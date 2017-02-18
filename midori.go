@@ -23,6 +23,10 @@ import (
 	"lib/some/irube/user"
 )
 
+var mode = 300 * time.Second
+
+var mean = 350 * time.Second
+
 const (
 	_DEBUG = false
 
@@ -214,7 +218,61 @@ func parameter(mode, mean float64) (float64, float64) {
 	return u, math.Sqrt(2 * s)
 }
 
+func parseArgs() (map[string]string, []string) {
+	keywords := make(map[string]string)
+	args := os.Args[1:]
+	var keyword string
+	for ; len(args) > 0; args = args[1:] {
+		arg := args[0]
+		if hasPrefixByte(arg, '-') {
+			if keyword != "" {
+				keywords[keyword] = ""
+			}
+			keyword = arg
+			continue
+		}
+		if keyword != "" {
+			keywords[keyword] = arg
+			keyword = ""
+			continue
+		}
+		break
+	}
+	return keywords, args
+}
+
+func hasPrefixByte(s string, b byte) bool {
+	if s == "" {
+		return false
+	}
+	return s[0] == b
+}
+
 func main() {
+	keywords, _ := parseArgs()
+	if iskwdset(keywords, "-h", "-help", "--h", "--help") {
+		fmt.Println("No help message is provided.")
+		return
+	}
+
+	if arg, set := keywords["--mean"]; set {
+		d, err := time.ParseDuration(arg)
+		if err != nil {
+			perror("--mean cannot be parsed", err)
+			abort()
+		}
+		mean = d
+	}
+
+	if arg, set := keywords["--mode"]; set {
+		d, err := time.ParseDuration(arg)
+		if err != nil {
+			perror("--mode cannot be parsed", err)
+			abort()
+		}
+		mode = d
+	}
+
 	tokens, err := getTokens()
 	if err != nil {
 		log.Fatal(err)
@@ -237,6 +295,19 @@ func main() {
 	u := rawu.Mid(mid)
 
 	loop(tok, rawu, u)
+}
+
+func perror(s string, err error) { fmt.Fprintln(os.Stderr, s, ":", err) }
+
+func abort() { os.Exit(1) }
+
+func iskwdset(keywords map[string]string, kwds ...string) bool {
+	for _, kwd := range kwds {
+		if _, set := keywords[kwd]; set {
+			return true
+		}
+	}
+	return false
 }
 
 func reseed() error {
