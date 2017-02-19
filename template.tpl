@@ -30,7 +30,7 @@
 {{define "entry-4"}}
 미도리
 ===
-{{image}}
+{{image}}<br>
 아오야마
 {{end}}
 

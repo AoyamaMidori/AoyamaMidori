@@ -6,6 +6,9 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"runtime"
+	"sync"
 	// "io"
 	"io/ioutil"
 	"log"
@@ -20,6 +23,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/fsnotify/fsnotify"
 	"lib/some/irube/user"
 )
 
@@ -39,28 +43,209 @@ type token struct {
 	Nickname string `json:"nickname"`
 }
 
-func loop(tok *token, rawu *user.User, um *user.UserMid) {
-	mode := float64(400 * time.Second)
-	mean := float64(450 * time.Second)
-	u, s := parameter(mode, mean)
+type fsEvent struct {
+	fsnotify.Event
+	Time time.Time
+}
 
-	images, err := parseImages()
+type fsEventFunc func(fsEvent)
+
+type fsListener struct {
+	fsw      *fsnotify.Watcher
+	dispatch map[string]fsEventFunc
+	alive    chan bool
+}
+
+func newFsListener() (*fsListener, error) {
+	fsw, err := fsnotify.NewWatcher()
+	if err != nil {
+		return nil, err
+	}
+	fsl := &fsListener{
+		fsw:      fsw,
+		dispatch: make(map[string]fsEventFunc),
+		alive:    make(chan bool),
+	}
+	go fsl.fs()
+	return fsl, nil
+}
+
+func (fsl *fsListener) fs() {
+	fsw := fsl.fsw
+	for {
+		select {
+		case ev := <-fsw.Events:
+			callback := fsl.dispatch[ev.Name]
+			if callback != nil {
+				callback(fsEvent{
+					Event: ev,
+					Time:  time.Now(),
+				})
+			}
+		case err := <-fsw.Errors:
+			log.Print("fsListener on background: ", err)
+		case <-fsl.alive:
+			return
+		}
+	}
+}
+
+func (fsl *fsListener) Add(rel string, fn fsEventFunc) error {
+	rel = filepath.Clean(rel)
+	err := fsl.fsw.Add(rel)
+	if err != nil {
+		return err
+	}
+	fsl.dispatch[rel] = fn
+	return nil
+}
+
+func (fsl *fsListener) Del(rel string) error {
+	rel = filepath.Clean(rel)
+	if _, ok := fsl.dispatch[rel]; !ok {
+		return nil
+	}
+	delete(fsl.dispatch, rel)
+	return fsl.fsw.Remove(rel)
+}
+
+func (fsl *fsListener) Close() error {
+	defer func() { recover() }()
+	close(fsl.alive)
+	return fsl.fsw.Close()
+}
+
+type reloadableTemplate struct {
+	rawmaster *template.Template
+	path      string
+	master    *template.Template
+	names     []string
+	sync.RWMutex
+}
+
+func loadTemplate(master *template.Template, path string) (*reloadableTemplate, error) {
+	r := &reloadableTemplate{
+		rawmaster: master,
+		path:      path,
+	}
+	if err := r.load(); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+func (r *reloadableTemplate) load() error {
+	r.Lock()
+	defer r.Unlock()
+	master, err := r.rawmaster.Clone()
+	if err != nil {
+		return err
+	}
+	err = parseTemplate(master, r.path)
+	if err != nil {
+		return err
+	}
+
+	r.master = master
+	r.names = entryTemplates(master)
+	return nil
+}
+
+func (r *reloadableTemplate) template() (*template.Template, []string) {
+	r.RLock()
+	defer r.RUnlock()
+	return r.master, r.names
+}
+
+func (r *reloadableTemplate) fs(fsl *fsListener) error {
+	return fsl.Add(r.path, r.fsFunc)
+}
+
+func (r *reloadableTemplate) fsFunc(ev fsEvent) {
+	switch ev.Op {
+	case fsnotify.Create, fsnotify.Write:
+		go r.load()
+	}
+}
+
+type reloadableImages struct {
+	loaded []string
+	path   string
+	sync.RWMutex
+}
+
+func newImages(path string) (*reloadableImages, error) {
+	r := &reloadableImages{
+		path: path,
+	}
+	if err := r.load(); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+func (r *reloadableImages) load() error {
+	r.Lock()
+	defer r.Unlock()
+	loaded, err := parseImages(r.path)
+	if err != nil {
+		return err
+	}
+	r.loaded = loaded
+	return nil
+}
+
+func (r *reloadableImages) images() []string {
+	r.RLock()
+	defer r.RUnlock()
+	return r.loaded
+}
+
+func (r *reloadableImages) fs(fsl *fsListener) error {
+	return fsl.Add(r.path, r.fsFunc)
+}
+
+func (r *reloadableImages) fsFunc(ev fsEvent) {
+	switch ev.Op {
+	case fsnotify.Create, fsnotify.Write:
+		go r.load()
+	}
+}
+
+func loop(tok *token, rawu *user.User, um *user.UserMid) {
+	u, s := parameter(float64(mode), float64(mean))
+
+	fsl, err := newFsListener()
+	if err != nil {
+		log.Printf("File system watcher is not supported on your platform %s: %v",
+			runtime.GOOS, err)
+	}
+
+	imagesLoader, err := newImages("images")
 	if err != nil {
 		log.Fatal(err)
+	}
+	if fsl != nil {
+		imagesLoader.fs(fsl)
 	}
 
 	master := template.New("master")
 	master.Funcs(map[string]interface{}{
 		"image": func() string {
+			images := imagesLoader.images()
 			url := choice(images)
 			return fmt.Sprintf(`<img src="%s" />`, url)
 		},
 	})
 
-	if err := parseTemplate(master); err != nil {
+	tplLoader, err := loadTemplate(master, "template.tpl")
+	if err != nil {
 		log.Fatal(err)
 	}
-	names := entryTemplates(master)
+
+	if fsl != nil {
+		tplLoader.fs(fsl)
+	}
 
 	buf := new(bytes.Buffer)
 	buf.Grow(8192)
@@ -68,6 +253,7 @@ func loop(tok *token, rawu *user.User, um *user.UserMid) {
 	for {
 		buf.Reset()
 
+		master, names := tplLoader.template()
 		name := choice(names)
 		err = master.ExecuteTemplate(buf, name, nil)
 		if err != nil {
@@ -149,8 +335,8 @@ func bodySeparator(line []byte) bool {
 	return repeat >= 3
 }
 
-func parseTemplate(master *template.Template) error {
-	b, err := ioutil.ReadFile("template.tpl")
+func parseTemplate(master *template.Template, name string) error {
+	b, err := ioutil.ReadFile(name)
 	if err != nil {
 		return err
 	}
@@ -186,8 +372,8 @@ func entryTemplates(master *template.Template) []string {
 	return names
 }
 
-func parseImages() ([]string, error) {
-	r, err := os.Open("images")
+func parseImages(name string) ([]string, error) {
+	r, err := os.Open(name)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +414,12 @@ func parseArgs() (map[string]string, []string) {
 			if keyword != "" {
 				keywords[keyword] = ""
 			}
-			keyword = arg
+			i := strings.IndexByte(arg, '=')
+			if i >= 0 {
+				keywords[arg[:i]] = arg[i+1:]
+			} else {
+				keyword = arg
+			}
 			continue
 		}
 		if keyword != "" {
