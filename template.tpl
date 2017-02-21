@@ -35,14 +35,14 @@
 {{define "entry-1"}}
 아오야마
 ===
-{{image}}
+{{image}}<br>
 {{bgm}}
 {{end}}
 
 {{define "entry-2"}}
 아오야마 미도리
 ===
-{{image}}
+{{image}}<br>
 {{bgm}}
 {{end}}
 
@@ -58,14 +58,14 @@
 미도리
 ===
 {{image}}<br>
-아오야마
+아오야마<br>
 {{bgm}}
 {{end}}
 
 {{define "entry-5"}}
 아오야마쨩!
 ===
-{{image}}
+{{image}}<br>
 {{bgm}}
 {{end}}
 
@@ -81,7 +81,7 @@
 아오야마 미도리 사랑해주세요!
 ===
 {{image}}<br>
-아오야마 미도리 사랑해주세요!
+<p>아오야마 미도리 사랑해주세요!</p>
 {{bgm}}
 {{end}}
 
@@ -89,7 +89,7 @@
 미도리쨩...
 ===
 {{image}}<br>
-사랑해...
+<p>사랑해...</p>
 {{bgm}}
 {{end}}
 
@@ -166,7 +166,7 @@
 {{define "entry-18"}}
 미도리쨔앙~♡
 ===
-{{image}}
+{{image}}<br>
 {{bgm}}
 {{end}}
 
