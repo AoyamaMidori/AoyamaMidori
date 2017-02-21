@@ -6,9 +6,6 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
-	"runtime"
-	"sync"
 	// "io"
 	"io/ioutil"
 	"log"
@@ -17,7 +14,10 @@ import (
 	"math/rand"
 	"net/url"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 	"unicode"
@@ -27,9 +27,9 @@ import (
 	"lib/some/irube/user"
 )
 
-var mode = 300 * time.Second
+var mode = 200 * time.Second
 
-var mean = 350 * time.Second
+var mean = 210 * time.Second
 
 const (
 	_DEBUG = false
@@ -115,7 +115,7 @@ func (fsl *fsListener) Close() error {
 	return fsl.fsw.Close()
 }
 
-type reloadableTemplate struct {
+type templateLoader struct {
 	rawmaster *template.Template
 	path      string
 	master    *template.Template
@@ -123,8 +123,8 @@ type reloadableTemplate struct {
 	sync.RWMutex
 }
 
-func loadTemplate(master *template.Template, path string) (*reloadableTemplate, error) {
-	r := &reloadableTemplate{
+func loadTemplate(master *template.Template, path string) (*templateLoader, error) {
+	r := &templateLoader{
 		rawmaster: master,
 		path:      path,
 	}
@@ -134,7 +134,7 @@ func loadTemplate(master *template.Template, path string) (*reloadableTemplate, 
 	return r, nil
 }
 
-func (r *reloadableTemplate) load() error {
+func (r *templateLoader) load() error {
 	r.Lock()
 	defer r.Unlock()
 	master, err := r.rawmaster.Clone()
@@ -151,31 +151,31 @@ func (r *reloadableTemplate) load() error {
 	return nil
 }
 
-func (r *reloadableTemplate) template() (*template.Template, []string) {
+func (r *templateLoader) template() (*template.Template, []string) {
 	r.RLock()
 	defer r.RUnlock()
 	return r.master, r.names
 }
 
-func (r *reloadableTemplate) fs(fsl *fsListener) error {
+func (r *templateLoader) fs(fsl *fsListener) error {
 	return fsl.Add(r.path, r.fsFunc)
 }
 
-func (r *reloadableTemplate) fsFunc(ev fsEvent) {
+func (r *templateLoader) fsFunc(ev fsEvent) {
 	switch ev.Op {
 	case fsnotify.Create, fsnotify.Write:
 		go r.load()
 	}
 }
 
-type reloadableImages struct {
-	loaded []string
-	path   string
+type urlsLoader struct {
+	path        string
+	loadedTexts []string
 	sync.RWMutex
 }
 
-func newImages(path string) (*reloadableImages, error) {
-	r := &reloadableImages{
+func newURLsLoader(path string) (*urlsLoader, error) {
+	r := &urlsLoader{
 		path: path,
 	}
 	if err := r.load(); err != nil {
@@ -184,28 +184,49 @@ func newImages(path string) (*reloadableImages, error) {
 	return r, nil
 }
 
-func (r *reloadableImages) load() error {
+func (r *urlsLoader) load() error {
 	r.Lock()
 	defer r.Unlock()
-	loaded, err := parseImages(r.path)
+	o, err := os.Open(r.path)
 	if err != nil {
 		return err
 	}
-	r.loaded = loaded
+	defer o.Close()
+
+	scanner := bufio.NewScanner(o)
+
+	var texts []string
+	for scanner.Scan() {
+		rawurl := scanner.Text()
+		if rawurl == "" {
+			continue
+		}
+		u, err := url.Parse(rawurl)
+		if err != nil {
+			return err
+		}
+		texts = append(texts, u.String())
+	}
+
+	if err = scanner.Err(); err != nil {
+		return err
+	}
+
+	r.loadedTexts = texts
 	return nil
 }
 
-func (r *reloadableImages) images() []string {
+func (r *urlsLoader) texts() []string {
 	r.RLock()
 	defer r.RUnlock()
-	return r.loaded
+	return r.loadedTexts
 }
 
-func (r *reloadableImages) fs(fsl *fsListener) error {
+func (r *urlsLoader) fs(fsl *fsListener) error {
 	return fsl.Add(r.path, r.fsFunc)
 }
 
-func (r *reloadableImages) fsFunc(ev fsEvent) {
+func (r *urlsLoader) fsFunc(ev fsEvent) {
 	switch ev.Op {
 	case fsnotify.Create, fsnotify.Write:
 		go r.load()
@@ -221,7 +242,7 @@ func loop(tok *token, rawu *user.User, um *user.UserMid) {
 			runtime.GOOS, err)
 	}
 
-	imagesLoader, err := newImages("images")
+	imagesLoader, err := newURLsLoader("images")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -229,12 +250,34 @@ func loop(tok *token, rawu *user.User, um *user.UserMid) {
 		imagesLoader.fs(fsl)
 	}
 
+	bgmsLoader, err := newURLsLoader("bgms")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if fsl != nil {
+		bgmsLoader.fs(fsl)
+	}
+
 	master := template.New("master")
 	master.Funcs(map[string]interface{}{
+		"image_url": func() string {
+			images := imagesLoader.texts()
+			return choice(images)
+		},
 		"image": func() string {
-			images := imagesLoader.images()
+			images := imagesLoader.texts()
 			url := choice(images)
 			return fmt.Sprintf(`<img src="%s" />`, url)
+		},
+		"bgm_url": func() string {
+			bgms := bgmsLoader.texts()
+			return choice(bgms)
+		},
+		"bgm": func() string {
+			bgms := bgmsLoader.texts()
+			url := choice(bgms)
+			const format = `<embed src="%s" autostart="true" allowscriptaccess="always" enablehtmlaccess="true" allowfullscreen="true" width="422" height="240"></embed>`
+			return fmt.Sprintf(format, url)
 		},
 	})
 
@@ -255,7 +298,16 @@ func loop(tok *token, rawu *user.User, um *user.UserMid) {
 
 		master, names := tplLoader.template()
 		name := choice(names)
-		err = master.ExecuteTemplate(buf, name, nil)
+
+		imagesLoader.RLock()
+		bgmsLoader.RLock()
+		err = master.ExecuteTemplate(buf, name, struct {
+			Nickname string
+		}{
+			Nickname: tok.Nickname,
+		})
+		imagesLoader.RUnlock()
+		bgmsLoader.RUnlock()
 		if err != nil {
 			log.Printf("template %q errored: %v", name, err)
 			continue
@@ -370,30 +422,6 @@ func entryTemplates(master *template.Template) []string {
 		names = append(names, name)
 	}
 	return names
-}
-
-func parseImages(name string) ([]string, error) {
-	r, err := os.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	defer r.Close()
-
-	var urls []string
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		urlStr := scanner.Text()
-		_, err = url.Parse(urlStr)
-		if err != nil {
-			break
-		}
-		urls = append(urls, urlStr)
-	}
-
-	if err = scanner.Err(); err != nil {
-		return nil, err
-	}
-	return urls, nil
 }
 
 func parameter(mode, mean float64) (float64, float64) {
