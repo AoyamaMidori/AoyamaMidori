@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	cryptorand "crypto/rand"
@@ -24,6 +25,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/fsnotify/fsnotify"
+	"lib/some/irube/request"
 	"lib/some/irube/user"
 )
 
@@ -242,46 +244,87 @@ func loop(tok *token, rawu *user.User, um *user.UserMid) {
 			runtime.GOOS, err)
 	}
 
-	imagesLoader, err := newURLsLoader("images")
+	imagesZip, err := zip.OpenReader("Aoyama Midori/images.zip")
 	if err != nil {
 		log.Fatal(err)
 	}
-	if fsl != nil {
-		imagesLoader.fs(fsl)
-	}
+	defer imagesZip.Close()
 
-	bgmsLoader, err := newURLsLoader("bgms")
+	bgmsZip, err := zip.OpenReader("Aoyama Midori/bgms.zip")
 	if err != nil {
 		log.Fatal(err)
 	}
-	if fsl != nil {
-		bgmsLoader.fs(fsl)
-	}
+	defer bgmsZip.Close()
 
+	// As executing a template may be concurrently run, lock is needed
+	var addFileLock sync.Mutex
 	master := template.New("master")
 	master.Funcs(map[string]interface{}{
-		"image_url": func() string {
-			images := imagesLoader.texts()
-			return choice(images)
+		"image": func() (string, error) {
+			i := rand.Intn(len(imagesZip.File))
+			o := imagesZip.File[i]
+
+			r, err := o.Open()
+			if err != nil {
+				return "", err
+			}
+			defer r.Close()
+
+			var url string
+			if strings.HasSuffix(o.Name, ".txt") {
+				b, err := ioutil.ReadAll(r)
+				if err != nil {
+					return "", err
+				}
+				url = strings.TrimSpace(string(b))
+			} else {
+				addFileLock.Lock()
+				resp, err := um.AddFile(o.Name, r, request.WatermarkNone, -1)
+				if err != nil {
+					addFileLock.Unlock()
+					return "", err
+				}
+
+				url = resp.Files[len(resp.Files)-1].URL
+				addFileLock.Unlock()
+			}
+
+			return fmt.Sprintf(`<img src="%s" />`, url), nil
 		},
-		"image": func() string {
-			images := imagesLoader.texts()
-			url := choice(images)
-			return fmt.Sprintf(`<img src="%s" />`, url)
-		},
-		"bgm_url": func() string {
-			bgms := bgmsLoader.texts()
-			return choice(bgms)
-		},
-		"bgm": func() string {
-			bgms := bgmsLoader.texts()
-			url := choice(bgms)
+		"bgm": func() (string, error) {
+			i := rand.Intn(len(bgmsZip.File))
+			o := bgmsZip.File[i]
+
+			r, err := o.Open()
+			if err != nil {
+				return "", err
+			}
+			defer r.Close()
+
+			var url string
+			if strings.HasSuffix(o.Name, ".txt") {
+				b, err := ioutil.ReadAll(r)
+				if err != nil {
+					return "", err
+				}
+				url = strings.TrimSpace(string(b))
+			} else {
+				addFileLock.Lock()
+				resp, err := um.AddFile(o.Name, r, request.WatermarkNone, -1)
+				if err != nil {
+					addFileLock.Unlock()
+					return "", err
+				}
+
+				url = resp.Files[len(resp.Files)-1].URL
+				addFileLock.Unlock()
+			}
 			const format = `<embed src="%s" autostart="true" allowscriptaccess="always" enablehtmlaccess="true" allowfullscreen="true" width="422" height="240"></embed>`
-			return fmt.Sprintf(format, url)
+			return fmt.Sprintf(format, url), nil
 		},
 	})
 
-	tplLoader, err := loadTemplate(master, "template.tpl")
+	tplLoader, err := loadTemplate(master, "Aoyama Midori/template.tpl")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -299,15 +342,19 @@ func loop(tok *token, rawu *user.User, um *user.UserMid) {
 		master, names := tplLoader.template()
 		name := choice(names)
 
-		imagesLoader.RLock()
-		bgmsLoader.RLock()
+		if err = um.VisitBoard(); err != nil {
+			log.Printf("VisitBoard erroed: %v", err)
+			continue
+		}
+		if _DEBUG {
+			log.Print("VisitBoard()")
+		}
+
 		err = master.ExecuteTemplate(buf, name, struct {
 			Nickname string
 		}{
 			Nickname: tok.Nickname,
 		})
-		imagesLoader.RUnlock()
-		bgmsLoader.RUnlock()
 		if err != nil {
 			log.Printf("template %q errored: %v", name, err)
 			continue
@@ -492,7 +539,7 @@ func main() {
 		mode = d
 	}
 
-	tokens, err := getTokens()
+	tokens, err := getTokens("Aoyama Midori/token.json")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -538,8 +585,8 @@ func reseed() error {
 	return nil
 }
 
-func getTokens() ([]*token, error) {
-	r, err := os.Open("token.json")
+func getTokens(path string) ([]*token, error) {
+	r, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}

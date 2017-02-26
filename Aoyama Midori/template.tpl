@@ -13,22 +13,20 @@
             image url assigned to src attribute that is chosen
             randomly.
 
-        image_url() string
-
-            is similar to image(), but returns only image url that is chosen randomly. 
-
         bgm() string
 
             is similar to image(), but use bgm urls instead of image urls.
 
-        bgm_url() string
-
-            is similar to image_url(), but use bgm urls instead of image urls.
-
         NOTE
 
-            image urls comes from file images and bgms url from bgms.
-            these two files will be exposed to public later.
+            Image and bgm come from images.zip and bgms.zip
+            respectivly. An item stored in these zip is selected
+            randomly. If an item with extension .txt is selected, the
+            contents of the item will be used as url. Otherwise, the
+            item is uploaded to ilbe server via file upload mechanism.
+            The item must be uploadable if uploaded.  A item is
+            uploadable if you can upload the item using ilbe web
+            interface.
 
 */}}
 
