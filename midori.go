@@ -6,6 +6,7 @@ import (
 	"bytes"
 	cryptorand "crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	// "io"
 	"io/ioutil"
@@ -285,6 +286,9 @@ func loop(tok *token, rawu *user.User, um *user.UserMid) {
 					return "", err
 				}
 
+				if len(resp.Files) == 0 {
+					return "", errors.New("uploding file fail")
+				}
 				url = resp.Files[len(resp.Files)-1].URL
 				addFileLock.Unlock()
 			}
@@ -316,6 +320,9 @@ func loop(tok *token, rawu *user.User, um *user.UserMid) {
 					return "", err
 				}
 
+				if len(resp.Files) == 0 {
+					return "", errors.New("uploding file fail")
+				}
 				url = resp.Files[len(resp.Files)-1].URL
 				addFileLock.Unlock()
 			}
